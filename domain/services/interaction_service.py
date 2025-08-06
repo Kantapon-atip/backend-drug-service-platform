@@ -37,6 +37,8 @@ class InteractionService:
             if not await codes_from_item(it) and it.name:
                 names_to_resolve.append(it.name)
 
+        print(f"📝 Names to resolve: {names_to_resolve}")
+        
         if names_to_resolve:
             name_map = await self.repo.resolve_names(names_to_resolve)
             for it in payload.drug_histories:
@@ -70,14 +72,59 @@ class InteractionService:
         # 5) Generate unique SUBS ID pairs
         unique_sids = sorted(subs_to_items.keys())
         pairs = [list(p) for p in combinations(unique_sids, 2)]
+        print(f"🧬 SUBS mapping: {dict(subs_to_items)}")
+        print(f"🔗 SUBS pairs: {pairs}")
 
-        # 6) Fetch raw contrast records
-        raw_records = await self.repo.fetch_contrasts(pairs)
-        pair_to_data = { (r["sub1_id"], r["sub2_id"]): r for r in raw_records }
-
-        # 7) Assemble ContrastItem rows
-        rows: List[ContrastItem] = []
+        # ===== เพิ่มขั้นตอนใหม่: External Filtering =====
+        
+        # 5.5) Collect all TPU codes from all items
+        all_tpu_codes = []
+        for group in (payload.drug_currents, payload.drug_histories):
+            for item in group:
+                if item.tpu_code:
+                    all_tpu_codes.append(item.tpu_code)
+        
+        # 5.6) Fetch external status for all TPU codes
+        external_status_map = await self.repo.fetch_external_status(all_tpu_codes)
+        print(f"🔍 External status map: {external_status_map}")
+        
+        # 5.7) Filter pairs to only include internal-internal interactions
+        filtered_pairs = []
         for sid1, sid2 in pairs:
+            # Check if this SUBS pair should be included
+            should_include = True
+            
+            # Get all items for both SUBS
+            items1 = subs_to_items.get(sid1, [])
+            items2 = subs_to_items.get(sid2, [])
+            all_items = items1 + items2
+            
+            # Check if any item in this interaction is external
+            for item in all_items:
+                if item.tpu_code:
+                    is_external = external_status_map.get(item.tpu_code, False)
+                    if is_external:
+                        should_include = False
+                        break
+            
+            # Only include if all drugs in this interaction are internal
+            if should_include:
+                filtered_pairs.append([sid1, sid2])
+        
+        print(f"📊 Original pairs: {len(pairs)}, Filtered pairs: {len(filtered_pairs)}")
+        
+        # ===== จบขั้นตอนใหม่ =====
+
+        # 6) Fetch raw contrast records (ใช้ filtered_pairs แทน pairs)
+        raw_records = await self.repo.fetch_contrasts(filtered_pairs)
+        pair_to_data = { (r["sub1_id"], r["sub2_id"]): r for r in raw_records }
+        print(f"💥 Raw contrast records found: {len(raw_records)}")
+        if raw_records:
+            print(f"📋 First record: {raw_records[0] if raw_records else 'None'}")
+
+        # 7) Assemble ContrastItem rows (ใช้ filtered_pairs แทน pairs)
+        rows: List[ContrastItem] = []
+        for sid1, sid2 in filtered_pairs:
             rec = pair_to_data.get((sid1, sid2)) or pair_to_data.get((sid2, sid1))
             if not rec:
                 continue

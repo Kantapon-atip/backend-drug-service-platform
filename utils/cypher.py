@@ -97,3 +97,11 @@ UNWIND $subs_ids AS sid
 MATCH (s:SUBS {`TMTID(SUBS)`: sid})
 RETURN sid AS code, s.SUBSNAME AS name
 """
+
+# ── Fetch external status from TPU nodes ─────────────────────────
+FETCH_EXTERNAL_STATUS_CYPHER = """
+MATCH (tpu:TPU)
+WHERE tpu.`TMTID(TPU)` IN $tpu_codes
+RETURN tpu.`TMTID(TPU)` as tpu_code, 
+       COALESCE(tpu.external, "false") as external
+"""

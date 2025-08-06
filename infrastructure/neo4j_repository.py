@@ -12,7 +12,8 @@ from utils.cypher import (
     SEARCHSUBS_CYPHER,
     CONTRAST_CYPHER,
     SUBS_NAME_CYPHER,
-    STRING_SEARCH_CYPHER
+    STRING_SEARCH_CYPHER,
+    FETCH_EXTERNAL_STATUS_CYPHER
 )
 from utils.helpers import normalize_query, sanitize_for_lucene
 
@@ -170,3 +171,32 @@ class Neo4jDrugRepository(DrugRepository):
                 name_map[record["code"]] = record["name"]
 
         return name_map
+
+    async def fetch_external_status(self, tpu_codes: List[str]) -> Dict[str, bool]:
+        """
+        ดึงข้อมูล external field จาก TPU nodes
+        Args:
+            tpu_codes: List ของ TPU codes ที่ต้องการตรวจสอบ
+        Returns:
+            Dict[tpu_code, is_external] เช่น {"123456": True, "789012": False}
+        """
+        external_map: Dict[str, bool] = {}
+        
+        async with self.driver.session() as session:
+            result = await session.run(
+                FETCH_EXTERNAL_STATUS_CYPHER, 
+                {"tpu_codes": tpu_codes}
+            )
+            async for record in result:
+                tpu_code = record["tpu_code"]
+                external_str = record["external"]
+                # Convert string "true"/"false" to boolean
+                is_external = external_str.lower() == "true"
+                external_map[tpu_code] = is_external
+        
+        # Ensure all TPU codes have entries (default to False if not found)
+        for tpu_code in tpu_codes:
+            if tpu_code not in external_map:
+                external_map[tpu_code] = False
+        
+        return external_map
