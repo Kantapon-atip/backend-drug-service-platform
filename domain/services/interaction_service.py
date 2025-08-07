@@ -115,22 +115,86 @@ class InteractionService:
         
         # ===== จบขั้นตอนใหม่ =====
 
-        # 6) Fetch raw contrast records (ใช้ filtered_pairs แทน pairs)
-        raw_records = await self.repo.fetch_contrasts(filtered_pairs)
+        # ===== เพิ่มขั้นตอนใหม่: History-History Filtering =====
+        
+        # 5.8) สร้าง mapping จาก SUBS ID ไปยัง drug type
+        subs_to_drug_types = {}
+        for sid in subs_to_items.keys():
+            types = set()
+            for item in subs_to_items[sid]:
+                if item in payload.drug_currents:
+                    types.add("current")
+                elif item in payload.drug_histories:
+                    types.add("history")
+            subs_to_drug_types[sid] = types
+        
+        print(f"🔍 SUBS to drug types mapping: {subs_to_drug_types}")
+        
+        # 5.9) กรอง history-history pairs ออกจาก filtered_pairs
+        final_pairs = []
+        for sid1, sid2 in filtered_pairs:
+            types1 = subs_to_drug_types.get(sid1, set())
+            types2 = subs_to_drug_types.get(sid2, set())
+            
+            # ถ้า SUBS pair นี้มีเฉพาะ history drugs → ข้าม
+            if types1 == {"history"} and types2 == {"history"}:
+                print(f"🚫 Skipping history-history pair: {sid1} <-> {sid2}")
+                continue
+            
+            # เก็บ current-current และ current-history pairs
+            final_pairs.append([sid1, sid2])
+        
+        print(f"📊 After history filtering: {len(final_pairs)} pairs remaining")
+        
+        # ===== จบขั้นตอนใหม่ =====
+
+        # 6) Fetch raw contrast records (ใช้ final_pairs แทน filtered_pairs)
+        raw_records = await self.repo.fetch_contrasts(final_pairs)
         pair_to_data = { (r["sub1_id"], r["sub2_id"]): r for r in raw_records }
         print(f"💥 Raw contrast records found: {len(raw_records)}")
         if raw_records:
             print(f"📋 First record: {raw_records[0] if raw_records else 'None'}")
 
-        # 7) Assemble ContrastItem rows (ใช้ filtered_pairs แทน pairs)
+        # 7) Assemble ContrastItem rows (ใช้ final_pairs แทน filtered_pairs)
         rows: List[ContrastItem] = []
-        for sid1, sid2 in filtered_pairs:
+        seen_interactions = set()  # Track unique interactions to avoid duplicates
+        
+        for sid1, sid2 in final_pairs:
             rec = pair_to_data.get((sid1, sid2)) or pair_to_data.get((sid2, sid1))
             if not rec:
                 continue
 
             for in_item in subs_to_items.get(sid1, []):
                 for ct_item in subs_to_items.get(sid2, []):
+                    # วิธีง่ายๆ: ตรวจสอบว่า item มาจาก current หรือ history
+                    in_from_current = any(curr is in_item for curr in payload.drug_currents)
+                    in_from_history = any(hist is in_item for hist in payload.drug_histories)
+                    ct_from_current = any(curr is ct_item for curr in payload.drug_currents)  
+                    ct_from_history = any(hist is ct_item for hist in payload.drug_histories)
+                    
+                    print(f"🔍 Source check: {in_item.tpu_code}(from_curr:{in_from_current},from_hist:{in_from_history}) <-> {ct_item.tpu_code}(from_curr:{ct_from_current},from_hist:{ct_from_history})")
+                    
+                    # ข้าม pure history-history combinations
+                    if in_from_history and ct_from_history:
+                        print(f"🚫 Skipping history-history ContrastItem: {in_item.tpu_code} <-> {ct_item.tpu_code}")
+                        continue
+                    
+                    # สร้าง unique key เพื่อป้องกันการสร้าง interaction ซ้ำ
+                    # ใช้ combination ของ SUBS และ TPU codes เท่านั้น
+                    interaction_key = (
+                        min(sid1, sid2), max(sid1, sid2),  # SUBS pair (sorted)
+                        min(in_item.tpu_code, ct_item.tpu_code), 
+                        max(in_item.tpu_code, ct_item.tpu_code),  # TPU pair (sorted)
+                        rec["severity"],
+                        rec["interaction_detail_en"][:50] if rec["interaction_detail_en"] else ""
+                    )
+                    
+                    if interaction_key in seen_interactions:
+                        print(f"🚫 Skipping duplicate interaction: {in_item.tpu_code} <-> {ct_item.tpu_code}")
+                        continue
+                    
+                    seen_interactions.add(interaction_key)
+                    
                     input_fields    = await fill_codes("input", in_item)
                     contrast_fields = await fill_codes("contrast", ct_item)
 
